@@ -725,7 +725,9 @@ pub fn has_unknown_tightening_keys(config: &RepoConfig) -> bool {
 /// An entry that exists on disk under its literal name, resolved against
 /// `dir` like the deny itself, is not reported: a Next.js `pages/[id]` or a
 /// template's `{{project}}` directory is denied as written, and a warning that
-/// it denies nothing would be false.
+/// it denies nothing would be false. The check uses symlink metadata rather
+/// than following the link, so a dangling symlink with a glob-looking name
+/// still counts as existing: the deny is emitted, so it is not "nothing".
 #[must_use]
 pub fn glob_like_deny_paths<'a>(config: &'a RepoConfig, dir: &Path) -> Vec<&'a str> {
     config
@@ -734,7 +736,11 @@ pub fn glob_like_deny_paths<'a>(config: &'a RepoConfig, dir: &Path) -> Vec<&'a s
         .iter()
         .map(String::as_str)
         .filter(|p| p.contains(['*', '?', '[', '{']))
-        .filter(|p| !dir.join(crate::config::expand_tilde(p)).exists())
+        .filter(|p| {
+            dir.join(crate::config::expand_tilde(p))
+                .symlink_metadata()
+                .is_err()
+        })
         .collect()
 }
 
@@ -1509,6 +1515,23 @@ paths = ["**/*.pem", "certs/*.key", "id_rsa?", "[ab].txt", "*.{pem,key}", "{a,b}
         let toml_str = r#"
 [deny]
 paths = ["pages/[id]", "{{project}}", "*.pem"]
+"#;
+        let config = parse_repo_config(toml_str).unwrap();
+        assert_eq!(glob_like_deny_paths(&config, dir.path()), ["*.pem"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_like_deny_paths_skip_a_dangling_symlink_with_that_name() {
+        // The deny is emitted for the link's own path, so the entry is not a
+        // no-op even though its target does not resolve.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("certs")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent-cplt-test", dir.path().join("certs/*.key"))
+            .unwrap();
+        let toml_str = r#"
+[deny]
+paths = ["certs/*.key", "*.pem"]
 "#;
         let config = parse_repo_config(toml_str).unwrap();
         assert_eq!(glob_like_deny_paths(&config, dir.path()), ["*.pem"]);
