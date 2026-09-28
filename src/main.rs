@@ -2042,8 +2042,8 @@ fn warn_glob_like_deny_paths(config: &repo_config::RepoConfig, label: &str) {
     let verb = if globs.len() == 1 { "denies" } else { "deny" };
     ui::warn(&format!(
         "{label}: cplt does not expand globs in deny.paths. {entries} {verb} \
-         nothing unless a file has exactly that name. Name each file or \
-         directory instead, for example \"certs/server.pem\" or \"certs\"."
+         nothing unless a file or directory has exactly that name. Name each \
+         file or directory instead, for example \"certs/server.pem\" or \"certs\"."
     ));
 }
 
