@@ -6292,6 +6292,14 @@ fn is_sensitive_basename(base: &str, by_extension: bool) -> bool {
         || (by_extension && KEYS.iter().any(|ext| base.ends_with(ext)))
 }
 
+/// Whether any of `files` is sensitive only through
+/// `sandbox.deny_key_files_by_extension` (`server.pem`, not `.pem` or `.env`).
+fn any_extension_only_match(files: &[String]) -> bool {
+    files
+        .iter()
+        .any(|f| !is_sensitive_basename(f.rsplit('/').next().unwrap_or(f), false))
+}
+
 /// Resolve a user-supplied check path to an absolute path without requiring it
 /// to exist (canonicalize the existing ancestor, then re-append the tail).
 fn canonicalize_check_path(path: &Path) -> PathBuf {
@@ -7073,6 +7081,7 @@ fn run_doctor(cli: &Cli, verbose: bool) -> ExitCode {
     findings.extend(doctor::tracked_env_finding(
         &sensitive,
         resolved.allow_env_files,
+        resolved.deny_key_files_by_extension && any_extension_only_match(&sensitive),
     ));
 
     // Tools as found on PATH — the shim, not its target.
@@ -10216,6 +10225,18 @@ mod tests {
     /// It cannot be derived from them — they are SBPL regex source and there is
     /// no regex engine linked — so this is the thing that stops the two
     /// drifting when someone adds a pattern (#401).
+    #[test]
+    fn extension_only_match_ignores_exact_names() {
+        let s = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(!any_extension_only_match(&s(&["a/.env", "b/.pem"])));
+        assert!(any_extension_only_match(&s(&[
+            "a/.env",
+            "certs/server.pem"
+        ])));
+        // The basename decides, not a directory that looks like a key.
+        assert!(!any_extension_only_match(&s(&["x.pem/.key"])));
+    }
+
     #[test]
     fn sensitive_basename_matches_the_profile_patterns() {
         assert_eq!(

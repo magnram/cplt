@@ -521,6 +521,16 @@ fn emit_sensitive_project_denies(
                 }
             }
             for root in &key_roots {
+                // Not refused: the grant is the user's call. But they should
+                // know it takes the CA bundles with it.
+                if let Some(ca) = key_root_covers_system_ca(root) {
+                    crate::ui::warn(&format!(
+                        "sandbox.deny_key_files_by_extension: the grant {root} covers {ca}, \
+                         so the system CA bundles there (cert.pem) are denied too and \
+                         curl, git over HTTPS and pip will fail TLS setup. Narrow the grant, \
+                         or set sandbox.deny_key_files_by_extension = false."
+                    ));
+                }
                 // `/` trims to the empty prefix, which is the global rule.
                 let r = escape_regex(root.trim_end_matches('/'));
                 for pattern in key_patterns {
@@ -2704,6 +2714,19 @@ fn overlapping_home_deny<'a>(
         .find_map(|p| overlapping_deny(extra_deny, Path::new(p)))
 }
 
+/// Where macOS and Homebrew keep the CA bundles TLS clients read.
+const SYSTEM_CA_DIRS: [&str; 3] = ["/private/etc/ssl", "/opt/homebrew/etc", "/usr/local/etc"];
+
+/// The system CA directory a key-file extension deny on `root` would reach,
+/// if any: `root` at or above it (`--allow-read /`), or inside it.
+fn key_root_covers_system_ca(root: &str) -> Option<&'static str> {
+    let root = Path::new(root);
+    SYSTEM_CA_DIRS.into_iter().find(|ca| {
+        let ca = Path::new(ca);
+        ca.starts_with(root) || root.starts_with(ca)
+    })
+}
+
 /// Withhold one opt-in re-allow because an explicit `--deny-path` overlaps it.
 ///
 /// Emits an SBPL breadcrumb and warns the user: `main.rs` reports the grant as
@@ -3085,6 +3108,31 @@ fn emit_network_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_root_over_a_system_ca_dir_is_flagged() {
+        for (root, ca) in [
+            ("/", "/private/etc/ssl"),
+            ("/private", "/private/etc/ssl"),
+            ("/private/etc", "/private/etc/ssl"),
+            ("/private/etc/ssl", "/private/etc/ssl"),
+            ("/opt", "/opt/homebrew/etc"),
+            ("/opt/homebrew/etc/openssl@3", "/opt/homebrew/etc"),
+            ("/usr/local", "/usr/local/etc"),
+        ] {
+            assert_eq!(key_root_covers_system_ca(root), Some(ca), "{root}");
+        }
+        // Component-wise, not string prefix: `/private/etc/sslx` is elsewhere.
+        for root in [
+            "/Users/test/app",
+            "/private/etc/sslx",
+            "/opt/homebrew/Cellar",
+            "/usr/local/bin",
+            "/work/app.v1+x",
+        ] {
+            assert_eq!(key_root_covers_system_ca(root), None, "{root}");
+        }
+    }
 
     /// Build a minimal `SandboxConfig` for SBPL-string tests.
     /// Resolving git from trusted directories means `git_common_dir` is `None`

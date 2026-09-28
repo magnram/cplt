@@ -3049,6 +3049,8 @@ mod macos_tests {
             fs::write(tmp.join("certs").join(name), "KEY\n").unwrap();
         }
         fs::write(tmp.join("certs/x.key.bak"), "NOT-A-KEY\n").unwrap();
+        // At the root of the tree, not below a directory: `(.*/)?` must match empty.
+        fs::write(tmp.join("tls.key"), "KEY\n").unwrap();
         fs::create_dir_all(tmp.join("certs/bundle.pem")).unwrap();
         fs::write(tmp.join("certs/bundle.pem/inner.txt"), "INNER\n").unwrap();
         let tmp = fs::canonicalize(&tmp).unwrap();
@@ -3068,6 +3070,7 @@ mod macos_tests {
         let on = write_real_profile(&opts);
         let on_results: Vec<_> = keys.iter().map(|k| (*k, cat(&on, k))).collect();
         let lookalike = cat(&on, "x.key.bak");
+        let top_level = run_sandboxed(&on, &format!("cat '{}'", tmp.join("tls.key").display()));
         // Scoped to granted trees: the system CA bundle is outside the project
         // and must stay readable, or curl, git and pip fail TLS setup.
         let ca_bundle = run_sandboxed(&on, "head -c 64 /etc/ssl/cert.pem >/dev/null && echo CA-OK");
@@ -3114,6 +3117,11 @@ mod macos_tests {
                 "{name} must survive overwrite and rm with deny_key_files_by_extension, got: {output}"
             );
         }
+        assert!(
+            !top_level.1 && !top_level.0.contains("KEY"),
+            "tls.key directly in the granted root must be blocked, got: {}",
+            top_level.0
+        );
         assert!(
             lookalike.1 && lookalike.0.contains("NOT-A-KEY"),
             "x.key.bak does not end in .key and stays readable, got: {}",

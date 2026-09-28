@@ -3377,6 +3377,26 @@ fn profile_denies_key_files_by_extension_when_enabled() {
     assert!(p.contains(r#"(deny file-read* (regex #"/\.pem$"))"#));
 }
 
+/// The granted root is regex source in these denies: an unescaped `.` or `+`
+/// would match other paths, or none.
+#[test]
+fn profile_key_file_extension_denies_escape_the_root() {
+    let read = [PathBuf::from("/work/app.v1+x")];
+    let p = generate_profile(
+        &SandboxConfig {
+            extra_read: &read,
+            deny_key_files_by_extension: true,
+            ..base_profile_options()
+        },
+        &[],
+    );
+    assert!(
+        p.contains(r#"(deny file-read* (regex #"^/work/app\.v1\+x/(.*/)?[^/]*\.pem$"))"#),
+        "the root must be regex-escaped: {p}"
+    );
+    assert!(!p.contains(r"^/work/app.v1+x/"), "no unescaped root: {p}");
+}
+
 #[test]
 fn profile_key_file_extension_denies_follow_allow_env_files() {
     let p = generate_profile(
