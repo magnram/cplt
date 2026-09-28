@@ -4545,6 +4545,24 @@ paths = [
             "a plain entry is not a glob: {stderr}"
         );
 
+        // `config show` and `cplt trust` list the entry under "[deny] (applied)",
+        // so they must carry the same warning.
+        let stderr_of = |repo: &Path, args: &[&str]| {
+            let out = cplt_cmd()
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("should run");
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        };
+        for args in [&["config", "show"][..], &["trust"][..]] {
+            let stderr = stderr_of(&globs, args);
+            assert!(
+                stderr.contains(r#""**/*.pem", "certs/*.key" deny nothing"#),
+                "{args:?} must warn about the glob entries: {stderr}"
+            );
+        }
+
         // A plain entry stays silent.
         let plain =
             repo_with_committed_cplt_toml("glob-plain", "[deny]\npaths = [\"certs/server.crt\"]\n");
@@ -4552,6 +4570,24 @@ paths = [
         assert!(
             !stderr.contains(WARNING),
             "plain entries must not warn: {stderr}"
+        );
+        for args in [&["config", "show"][..], &["trust"][..]] {
+            let stderr = stderr_of(&plain, args);
+            assert!(
+                !stderr.contains(WARNING),
+                "{args:?} must not warn for plain entries: {stderr}"
+            );
+        }
+
+        // An entry that exists under its literal name is denied as written: a
+        // Next.js dynamic route is a real directory, not a glob.
+        let literal =
+            repo_with_committed_cplt_toml("glob-literal", "[deny]\npaths = [\"pages/[id]\"]\n");
+        std::fs::create_dir_all(literal.join("pages/[id]")).unwrap();
+        let stderr = print_profile(&literal, &[]);
+        assert!(
+            !stderr.contains(WARNING),
+            "an existing literal path must not warn: {stderr}"
         );
 
         // Named repository: the label is that repository's own file, and one
@@ -4597,8 +4633,20 @@ paths = [
             !stderr.contains(WARNING),
             "a plain path must not warn: {stderr}"
         );
+        // Only the value just written is reported, not the glob already in the file.
+        let stderr = set(&repo, "certs");
+        assert!(
+            !stderr.contains(WARNING),
+            "a plain path must not re-list earlier globs: {stderr}"
+        );
+        let stderr = set(&repo, "*.key");
+        assert!(
+            stderr
+                .contains(r#": cplt does not expand globs in deny.paths. "*.key" denies nothing"#),
+            "set --repo must name only the new glob: {stderr}"
+        );
 
-        for dir in [&globs, &plain, &named, &repo, &repo_plain] {
+        for dir in [&globs, &plain, &literal, &named, &repo, &repo_plain] {
             let _ = std::fs::remove_dir_all(dir);
         }
     }

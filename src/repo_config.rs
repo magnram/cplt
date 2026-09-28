@@ -721,14 +721,20 @@ pub fn has_unknown_tightening_keys(config: &RepoConfig) -> bool {
 ///
 /// Refusing the entry is not an option here. A validation error drops the
 /// whole file, and with it every other `[deny]` entry (#385 M-01).
+///
+/// An entry that exists on disk under its literal name, resolved against
+/// `dir` like the deny itself, is not reported: a Next.js `pages/[id]` or a
+/// template's `{{project}}` directory is denied as written, and a warning that
+/// it denies nothing would be false.
 #[must_use]
-pub fn glob_like_deny_paths(config: &RepoConfig) -> Vec<&str> {
+pub fn glob_like_deny_paths<'a>(config: &'a RepoConfig, dir: &Path) -> Vec<&'a str> {
     config
         .deny
         .paths
         .iter()
         .map(String::as_str)
         .filter(|p| p.contains(['*', '?', '[', '{']))
+        .filter(|p| !dir.join(crate::config::expand_tilde(p)).exists())
         .collect()
 }
 
@@ -1475,20 +1481,37 @@ write = ["~/.m2/repository"]
         // included.
         let toml_str = r#"
 [deny]
-paths = ["**/*.pem", "certs/*.key", "id_rsa?", "[ab].txt", "*.{pem,key}", "secrets.txt"]
+paths = ["**/*.pem", "certs/*.key", "id_rsa?", "[ab].txt", "*.{pem,key}", "{a,b}.txt", "secrets.txt"]
 "#;
         let config = parse_repo_config(toml_str).unwrap();
         assert!(validate_repo_config(&config).is_ok());
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            glob_like_deny_paths(&config),
+            glob_like_deny_paths(&config, dir.path()),
             [
                 "**/*.pem",
                 "certs/*.key",
                 "id_rsa?",
                 "[ab].txt",
-                "*.{pem,key}"
+                "*.{pem,key}",
+                "{a,b}.txt"
             ]
         );
+    }
+
+    #[test]
+    fn glob_like_deny_paths_skip_entries_that_exist_under_their_literal_name() {
+        // A Next.js dynamic route and a template directory: real names, so the
+        // deny works as written and must not be reported as matching nothing.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pages/[id]")).unwrap();
+        std::fs::create_dir(dir.path().join("{{project}}")).unwrap();
+        let toml_str = r#"
+[deny]
+paths = ["pages/[id]", "{{project}}", "*.pem"]
+"#;
+        let config = parse_repo_config(toml_str).unwrap();
+        assert_eq!(glob_like_deny_paths(&config, dir.path()), ["*.pem"]);
     }
 
     #[test]
@@ -1498,6 +1521,7 @@ paths = ["**/*.pem", "certs/*.key", "id_rsa?", "[ab].txt", "*.{pem,key}", "secre
 paths = [".env", "certs/server.pem", "~/secrets", "apps/web/.env.local"]
 "#;
         let config = parse_repo_config(toml_str).unwrap();
-        assert!(glob_like_deny_paths(&config).is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(glob_like_deny_paths(&config, dir.path()).is_empty());
     }
 }
