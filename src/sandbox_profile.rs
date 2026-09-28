@@ -216,6 +216,7 @@ pub fn generate_profile_with_playwright_socket_dir(
         &mut sb,
         &project_roots,
         config.extra_write,
+        config.extra_read,
         config.allow_env_files,
         config.deny_key_files_by_extension,
         config.extra_deny,
@@ -414,6 +415,7 @@ fn emit_sensitive_project_denies(
     sb: &mut String,
     project_roots: &[String],
     extra_write: &[PathBuf],
+    extra_read: &[PathBuf],
     allow_env_files: bool,
     deny_key_files_by_extension: bool,
     extra_deny: &[PathBuf],
@@ -500,14 +502,32 @@ fn emit_sensitive_project_denies(
         // `sandbox.deny_key_files_by_extension`: the patterns above only match
         // a key file named exactly `.pem`. See the constant's docs. Emitted
         // before the re-allow below, so dependency fixtures stay readable.
+        //
+        // Scoped to the trees the user granted (project, named roots,
+        // `allow.write`, `allow.read`), not global like the patterns above:
+        // `*.pem` matches every CA bundle on the system (`/etc/ssl/cert.pem`,
+        // Homebrew's `cert.pem`), and denying those breaks every TLS client.
         let key_patterns: &[&str] = if deny_key_files_by_extension {
             SENSITIVE_KEY_FILE_EXTENSION_PATTERNS
         } else {
             &[]
         };
-        for pattern in key_patterns {
-            sbpl!(sb, "(deny file-read* (regex #\"/{pattern}\"))");
-            sbpl!(sb, "(deny file-write* (regex #\"/{pattern}\"))");
+        if !key_patterns.is_empty() {
+            let mut key_roots = roots.clone();
+            for p in extra_read {
+                let s = p.to_string_lossy().into_owned();
+                if !key_roots.contains(&s) {
+                    key_roots.push(s);
+                }
+            }
+            for root in &key_roots {
+                // `/` trims to the empty prefix, which is the global rule.
+                let r = escape_regex(root.trim_end_matches('/'));
+                for pattern in key_patterns {
+                    sbpl!(sb, "(deny file-read* (regex #\"^{r}/(.*/)?{pattern}\"))");
+                    sbpl!(sb, "(deny file-write* (regex #\"^{r}/(.*/)?{pattern}\"))");
+                }
+            }
         }
         // Re-allow READ inside the extracted dependency stores, after the deny,
         // because SBPL is last-match-wins. Write stays denied: nothing should be
@@ -534,6 +554,12 @@ fn emit_sensitive_project_denies(
             // file re-allow, as it does for the other opt-in re-allows
             // (`overlapping_deny`). Without this, `--deny-path ~/go/pkg/mod/x`
             // would leave `x/server.pem` readable once the key is on.
+            //
+            // Fail-closed and coarse: a deny anywhere under the store withholds
+            // the key-file re-allow for the WHOLE store, so `server.pem` in
+            // every other module there stays denied too (when a granted tree
+            // covers the store). Exact-name files in a store (`.env`, `.pem`)
+            // are handled by #597 (PR #601), not here.
             let spellings = [
                 Some(PathBuf::from(&tree)),
                 std::fs::canonicalize(&tree).ok(),

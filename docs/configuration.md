@@ -824,19 +824,25 @@ It has no effect on Linux, where the launch says so. Landlock cannot deny a path
 
 The default deny for key files is a pattern on the whole file name. It blocks a file named exactly `.pem`, `.key`, `.p12`, `.pfx` or `.jks`, but not `server.pem`, `tls.key` or `keystore.jks`. Those stay readable and writable.
 
-`sandbox.deny_key_files_by_extension` also denies any file whose name ends in one of those extensions, for read and write, on macOS. A directory with such a name (`certs.pem/`) is not affected, and neither is a name that only contains the extension (`x.key.bak`).
+`sandbox.deny_key_files_by_extension` also denies any file whose name ends in one of those extensions, for read and write, on macOS. A name that only contains the extension (`x.key.bak`) is not affected. A directory whose name ends in one (`certs.pem/`) is denied itself, so it cannot be listed, but the files inside it stay readable.
+
+The extension denies apply only inside the trees you granted: the project, every `--repo-dir` root, and every `allow.write` and `allow.read` path. They are not global, unlike the exact-name patterns, because `*.pem` also matches the system CA bundles (`/etc/ssl/cert.pem`, Homebrew's `cert.pem`) that curl, git and pip need for HTTPS. Those stay readable unless you grant a tree that contains them.
 
 ```bash
 cplt config set sandbox.deny_key_files_by_extension true
 ```
 
-Off by default, because it blocks files that work today:
+Off by default, because it blocks files that work today, anywhere inside a granted tree:
 
 - a local HTTPS dev server that reads its certificate or key from the project
 - tests that load a key or keystore fixture from the project
 - a Java or Android build that signs with a `.jks` or `.p12` in the project
+- a CA bundle inside a granted tree. A Python virtualenv in the project ships `certifi/cacert.pem`, so `pip` and `requests` from that venv fail TLS verification. A wide grant such as `allow.read = ["~"]` puts every tool's bundled `cacert.pem` under the deny, and a grant that covers `/etc` or `/opt/homebrew` puts the system bundles there too
+- a package under `node_modules` or a vendored dependency that reads a `.pem` it ships
 
-It follows `--allow-env-files`: with that flag, none of these patterns are emitted. Like the default patterns, it is lifted for read inside the extracted dependency stores (`~/go/pkg/mod`, `~/.cargo/registry`), where a key file is a library's test fixture.
+To recover, set the key back to `false`. `--allow-env-files` also lifts it, but it lifts the `.env` deny as well.
+
+It follows `--allow-env-files`: with that flag, none of these patterns are emitted. Like the default patterns, it is lifted for read inside the extracted dependency stores (`~/go/pkg/mod`, `~/.cargo/registry`) when a granted tree covers them, since a key file there is a library's test fixture. That carve-out fails closed: a `--deny-path` anywhere inside a store withholds the key-file carve-out for the whole store, so every `server.pem` in it stays denied, not only the ones under your deny. Files named exactly `.pem` or `.env` in a store are a separate case, handled by #597 (PR #601).
 
 It has no effect on Linux, where the launch says so. Landlock cannot deny a file by name pattern, so on Linux the default patterns do not apply either.
 

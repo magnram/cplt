@@ -403,7 +403,7 @@ pub(super) const CONFIG_KEYS: &[ConfigKeyInfo] = &[
         value_type: ConfigValueType::Bool,
         dangerous: false,
         default_display: "false",
-        description: "macOS only: deny .pem, .key, .p12, .pfx and .jks files by extension (server.pem, tls.key), not only files named exactly .pem. Breaks tools that read a key or certificate from the project, such as a local HTTPS dev server. No effect on Linux.",
+        description: "macOS only: inside the project and every granted tree (--repo-dir, allow.write, allow.read), deny .pem, .key, .p12, .pfx and .jks files by extension (server.pem, tls.key), not only files named exactly .pem. Breaks anything there that reads a key or certificate: a local HTTPS dev server, key fixtures in tests, a project virtualenv's certifi/cacert.pem (pip and requests fail TLS), and system CA bundles if a grant covers /etc or /opt/homebrew. No effect on Linux.",
     },
     ConfigKeyInfo {
         section: "sandbox",

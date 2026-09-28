@@ -2158,18 +2158,22 @@ fn the_env_deny_is_lifted_for_read_inside_dependency_stores_only() {
 }
 
 /// With `sandbox.deny_key_files_by_extension`, the wider key file patterns get
-/// the same read carve-out in dependency stores, after the deny.
+/// the same read carve-out in dependency stores, after the deny. The deny is
+/// scoped to granted trees, so it reaches a store only through a grant that
+/// covers it, such as `allow.read = ["~"]`.
 #[test]
 fn key_file_extension_denies_are_lifted_for_read_inside_dependency_stores() {
+    let home = [PathBuf::from("/Users/test")];
     let profile = generate_profile(
         &SandboxConfig {
+            extra_read: &home,
             deny_key_files_by_extension: true,
             ..base_profile_options()
         },
         &[],
     );
     let deny = profile
-        .find(r#"(deny file-read* (regex #"/[^/]*\.pem$"))"#)
+        .find(r#"(deny file-read* (regex #"^/Users/test/(.*/)?[^/]*\.pem$"))"#)
         .expect("the deny stands");
     let allow = profile
         .find(r#"(allow file-read* (regex #"^/Users/test/go/pkg/mod/.*/[^/]*\.pem$"))"#)
@@ -3333,8 +3337,12 @@ fn profile_omits_key_file_extension_denies_by_default() {
 
 #[test]
 fn profile_denies_key_files_by_extension_when_enabled() {
+    let write = [PathBuf::from("/work/sibling")];
+    let read = [PathBuf::from("/data/certs")];
     let p = generate_profile(
         &SandboxConfig {
+            extra_write: &write,
+            extra_read: &read,
             deny_key_files_by_extension: true,
             ..base_profile_options()
         },
@@ -3343,20 +3351,28 @@ fn profile_denies_key_files_by_extension_when_enabled() {
     let project_allow = p
         .find("(allow file-read* (subpath \"/projects/app\"))")
         .unwrap();
-    for ext in KEY_FILE_EXTENSIONS {
-        let read = format!(r#"(deny file-read* (regex #"/[^/]*\.{ext}$"))"#);
-        let write = format!(r#"(deny file-write* (regex #"/[^/]*\.{ext}$"))"#);
-        let read_at = p
-            .find(&read)
-            .unwrap_or_else(|| panic!("missing {read}: {p}"));
-        let write_at = p
-            .find(&write)
-            .unwrap_or_else(|| panic!("missing {write}: {p}"));
-        assert!(
-            read_at > project_allow && write_at > project_allow,
-            "{ext} deny must come AFTER project allow for SBPL last-match-wins"
-        );
+    for r in ["/projects/app", "/work/sibling", "/data/certs"] {
+        for ext in KEY_FILE_EXTENSIONS {
+            let read = format!(r#"(deny file-read* (regex #"^{r}/(.*/)?[^/]*\.{ext}$"))"#);
+            let write = format!(r#"(deny file-write* (regex #"^{r}/(.*/)?[^/]*\.{ext}$"))"#);
+            let read_at = p
+                .find(&read)
+                .unwrap_or_else(|| panic!("missing {read}: {p}"));
+            let write_at = p
+                .find(&write)
+                .unwrap_or_else(|| panic!("missing {write}: {p}"));
+            assert!(
+                read_at > project_allow && write_at > project_allow,
+                "{ext} deny must come AFTER project allow for SBPL last-match-wins"
+            );
+        }
     }
+    // Never global: `/etc/ssl/cert.pem` and every other CA bundle must stay
+    // readable, or TLS clients fail.
+    assert!(
+        !p.contains(r#"(regex #"/[^/]*\."#),
+        "the extension denies must be scoped to granted trees: {p}"
+    );
     // The literal-name patterns stay; the new ones are additive.
     assert!(p.contains(r#"(deny file-read* (regex #"/\.pem$"))"#));
 }

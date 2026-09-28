@@ -889,8 +889,13 @@ pub const SENSITIVE_PROJECT_PATTERNS: &[&str] = &[
 /// the docs and `is_sensitive_basename` treat them as sensitive. The `.env`
 /// entries are not affected, because `.env` really is the whole file name.
 ///
-/// `[^/]*` lets any file name come before the extension, and nothing else: a
-/// directory named `certs.pem/` does not match. These are added next to the
+/// `[^/]*` lets any file name come before the extension. The pattern matches a
+/// path that ends in the extension, so a directory named `certs.pem` is itself
+/// denied (it cannot be listed), while the files inside it are not.
+///
+/// Unlike the default patterns these are emitted per granted tree (project,
+/// named roots, `allow.write`, `allow.read`), never globally: `*.pem` would
+/// otherwise hit every CA bundle on the system. These are added next to the
 /// default patterns, not in place of them, so with the key unset the profile
 /// is unchanged. Off by default because it can break a working setup, such as
 /// a dev server that reads a TLS certificate from the project (staged rollout,

@@ -584,7 +584,7 @@ controlling terminal, and that terminal is the user's shell.
 
 *Possible mitigation:* a future hardening category could mask the hostname and inject synthetic env values, at the risk of breaking tools that depend on accurate system info. Low priority, since recon without credential access has little value.
 
-**Key files are denied by exact name by default, not by extension.** The default name patterns for key files block a file named exactly `.pem`, `.key`, `.p12`, `.pfx` or `.jks`. They do not block `server.pem`, `tls.key` or `keystore.jks`, which is where keys usually live, so an agent can read and overwrite those on macOS. `sandbox.deny_key_files_by_extension` (off by default under the staged-rollout rule) denies any file name that ends in one of those extensions. On Linux neither form applies: Landlock cannot deny a file by name pattern.
+**Key files are denied by exact name by default, not by extension.** The default name patterns for key files block a file named exactly `.pem`, `.key`, `.p12`, `.pfx` or `.jks`. They do not block `server.pem`, `tls.key` or `keystore.jks`, which is where keys usually live, so an agent can read and overwrite those on macOS. `sandbox.deny_key_files_by_extension` (off by default under the staged-rollout rule) denies any file name that ends in one of those extensions inside the project and every other granted tree. It is scoped to those trees rather than global so the system CA bundles (`/etc/ssl/cert.pem`) stay readable. On Linux neither form applies: Landlock cannot deny a file by name pattern.
 
 **Project source code is readable and writable.** The agent needs read/write access to the project directory. That is its job. A compromised agent could exfiltrate source over HTTPS on port 443.
 

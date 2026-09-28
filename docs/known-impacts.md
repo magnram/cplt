@@ -99,7 +99,7 @@ macOS is unaffected: the Keychain is granted (narrowed per agent by
 | `next build` / `next dev`      | ⚠️ May fail | Next.js auto-loads `.env`, `.env.local`, `.env.production` at startup |
 | `npm run dev` (Node.js)        | ⚠️ May fail | Apps using `dotenv` to load config will get `undefined` env vars      |
 | `npm test` / `vitest`          | ⚠️ May fail | Tests that depend on `.env` for config won't find the values          |
-| TLS dev servers (`.pem` certs) | ✅ Works    | `server.pem`, `localhost.key` stay readable by default. Blocked with `sandbox.deny_key_files_by_extension` |
+| TLS dev servers (`.pem` certs) | ✅ Works    | `server.pem`, `localhost.key` stay readable by default. Blocked with `sandbox.deny_key_files_by_extension`, which also blocks a project virtualenv's `certifi/cacert.pem` |
 | `.env.example`                 | ⚠️ Blocked  | Matches the `.env.*` pattern; use `--allow-env-files` if needed       |
 | Writing `.env` files           | ✅ Works    | Only read is denied; Copilot can create `.env` from templates         |
 | `go mod verify`, `cargo` over an extracted crate | ✅ Works | Read is re-allowed under `~/go/pkg/mod` and `~/.cargo/registry`: a `.env` there is a library's test fixture (`gotenv` ships one), not your secret, and the content is checksum-verified and came from a registry. Write stays denied |

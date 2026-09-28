@@ -3049,6 +3049,8 @@ mod macos_tests {
             fs::write(tmp.join("certs").join(name), "KEY\n").unwrap();
         }
         fs::write(tmp.join("certs/x.key.bak"), "NOT-A-KEY\n").unwrap();
+        fs::create_dir_all(tmp.join("certs/bundle.pem")).unwrap();
+        fs::write(tmp.join("certs/bundle.pem/inner.txt"), "INNER\n").unwrap();
         let tmp = fs::canonicalize(&tmp).unwrap();
         let home = home_dir();
 
@@ -3066,6 +3068,15 @@ mod macos_tests {
         let on = write_real_profile(&opts);
         let on_results: Vec<_> = keys.iter().map(|k| (*k, cat(&on, k))).collect();
         let lookalike = cat(&on, "x.key.bak");
+        // Scoped to granted trees: the system CA bundle is outside the project
+        // and must stay readable, or curl, git and pip fail TLS setup.
+        let ca_bundle = run_sandboxed(&on, "head -c 64 /etc/ssl/cert.pem >/dev/null && echo CA-OK");
+        // A directory whose name ends in `.pem` is itself denied, its files are not.
+        let dir_inner = cat(&on, "bundle.pem/inner.txt");
+        let dir_list = run_sandboxed(
+            &on,
+            &format!("ls '{}'", tmp.join("certs/bundle.pem").display()),
+        );
         // Overwrite, then delete. The file must be unchanged afterwards.
         let tampered: Vec<_> = keys
             .iter()
@@ -3107,6 +3118,21 @@ mod macos_tests {
             lookalike.1 && lookalike.0.contains("NOT-A-KEY"),
             "x.key.bak does not end in .key and stays readable, got: {}",
             lookalike.0
+        );
+        assert!(
+            ca_bundle.1 && ca_bundle.0.contains("CA-OK"),
+            "/etc/ssl/cert.pem is outside every granted tree and stays readable, got: {}",
+            ca_bundle.0
+        );
+        assert!(
+            dir_inner.1 && dir_inner.0.contains("INNER"),
+            "a file inside a directory named bundle.pem stays readable, got: {}",
+            dir_inner.0
+        );
+        assert!(
+            !dir_list.1,
+            "a directory named bundle.pem cannot be listed, got: {}",
+            dir_list.0
         );
     }
 
