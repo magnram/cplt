@@ -3066,6 +3066,19 @@ mod macos_tests {
         let on = write_real_profile(&opts);
         let on_results: Vec<_> = keys.iter().map(|k| (*k, cat(&on, k))).collect();
         let lookalike = cat(&on, "x.key.bak");
+        // Overwrite, then delete. The file must be unchanged afterwards.
+        let tampered: Vec<_> = keys
+            .iter()
+            .map(|k| {
+                let path = tmp.join("certs").join(k);
+                let cmd = format!(
+                    "printf GONE > '{p}' 2>&1; rm '{p}' 2>&1; echo EXIT:$?",
+                    p = path.display()
+                );
+                let (output, _) = run_sandboxed(&on, &cmd);
+                (*k, output, fs::read_to_string(&path).ok())
+            })
+            .collect();
 
         fs::remove_dir_all(&tmp).ok();
         fs::remove_file(&off).ok();
@@ -3081,6 +3094,13 @@ mod macos_tests {
             assert!(
                 !success && !output.contains("KEY"),
                 "{name} must be blocked with deny_key_files_by_extension, got: {output}"
+            );
+        }
+        for (name, output, content) in tampered {
+            assert_eq!(
+                content.as_deref(),
+                Some("KEY\n"),
+                "{name} must survive overwrite and rm with deny_key_files_by_extension, got: {output}"
             );
         }
         assert!(
