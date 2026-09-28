@@ -399,6 +399,14 @@ pub(super) const CONFIG_KEYS: &[ConfigKeyInfo] = &[
     },
     ConfigKeyInfo {
         section: "sandbox",
+        key: "deny_key_files_by_extension",
+        value_type: ConfigValueType::Bool,
+        dangerous: false,
+        default_display: "false",
+        description: "macOS only: deny .pem, .key, .p12, .pfx and .jks files by extension (server.pem, tls.key), not only files named exactly .pem. Breaks tools that read a key or certificate from the project, such as a local HTTPS dev server. No effect on Linux.",
+    },
+    ConfigKeyInfo {
+        section: "sandbox",
         key: "refuse_invalid_repo_config",
         value_type: ConfigValueType::Bool,
         dangerous: false,
@@ -1051,6 +1059,15 @@ bool_keys! {
         config = |c: &Config| c.sandbox.deny_nested_git,
         baseline = |_: PresetBaseline| false,
         resolved = |r: &Resolved| r.deny_nested_git;
+
+    /// Config-only and off by default (staged rollout): it blocks key and
+    /// certificate files that are readable today, such as a dev server's
+    /// `localhost.pem`.
+    deny_key_files_by_extension, "sandbox", "deny_key_files_by_extension",
+        cli = |_: &CliFlags| FeatureToggle::UseDefault,
+        config = |c: &Config| c.sandbox.deny_key_files_by_extension,
+        baseline = |_: PresetBaseline| false,
+        resolved = |r: &Resolved| r.deny_key_files_by_extension;
 
     /// Config-only and off by default (staged rollout, #385 M-01): with it on,
     /// a typo in a committed `.cplt.toml` stops every launch in that repo.

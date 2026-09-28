@@ -492,6 +492,7 @@ mod macos_tests {
             allow_gpg_signing: false,
             deny_clipboard: false,
             deny_nested_git: false,
+            deny_key_files_by_extension: false,
             deny_copilot_dir_exec: false,
             allow_jvm_attach: false,
             allow_msbuild: false,
@@ -3028,6 +3029,64 @@ mod macos_tests {
         assert!(
             success && output.contains("SECRET=hunter2"),
             "with allow_env_files, .env should be readable, got: {output}"
+        );
+    }
+
+    #[test]
+    fn real_profile_key_files_by_extension() {
+        require_sandbox!();
+        let project = fs::canonicalize(".").unwrap();
+        let tmp = project.join(format!(".cplt-keyext-{}", std::process::id()));
+        fs::create_dir_all(tmp.join("certs")).unwrap();
+        let keys = [
+            "server.pem",
+            "tls.key",
+            "keystore.p12",
+            "cert.pfx",
+            "store.jks",
+        ];
+        for name in keys {
+            fs::write(tmp.join("certs").join(name), "KEY\n").unwrap();
+        }
+        fs::write(tmp.join("certs/x.key.bak"), "NOT-A-KEY\n").unwrap();
+        let tmp = fs::canonicalize(&tmp).unwrap();
+        let home = home_dir();
+
+        let cat = |profile: &PathBuf, name: &str| {
+            let path = tmp.join("certs").join(name);
+            run_sandboxed(profile, &format!("cat '{}'", path.display()))
+        };
+
+        // Unset: only a file named exactly `.pem` / `.key` is denied.
+        let off = write_real_profile(&default_opts(&tmp, &home));
+        let off_results: Vec<_> = keys.iter().map(|k| (*k, cat(&off, k))).collect();
+
+        let mut opts = default_opts(&tmp, &home);
+        opts.deny_key_files_by_extension = true;
+        let on = write_real_profile(&opts);
+        let on_results: Vec<_> = keys.iter().map(|k| (*k, cat(&on, k))).collect();
+        let lookalike = cat(&on, "x.key.bak");
+
+        fs::remove_dir_all(&tmp).ok();
+        fs::remove_file(&off).ok();
+        fs::remove_file(&on).ok();
+
+        for (name, (output, success)) in off_results {
+            assert!(
+                success && output.contains("KEY"),
+                "{name} is readable when the key is unset, got: {output}"
+            );
+        }
+        for (name, (output, success)) in on_results {
+            assert!(
+                !success && !output.contains("KEY"),
+                "{name} must be blocked with deny_key_files_by_extension, got: {output}"
+            );
+        }
+        assert!(
+            lookalike.1 && lookalike.0.contains("NOT-A-KEY"),
+            "x.key.bak does not end in .key and stays readable, got: {}",
+            lookalike.0
         );
     }
 

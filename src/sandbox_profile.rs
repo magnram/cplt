@@ -24,9 +24,10 @@ use super::policy::{
     DENIED_CACHE_PREFIXES, DENIED_DOTFILES, DENIED_FILES, DENIED_HOME_SUBPATHS,
     DEPENDENCY_SOURCE_TREES, EXEC_IN_WRITABLE, GPG_SIGNING_ALLOW_FILES, HOME_CONFIG_FILES,
     HomeToolDir, PROTECTED_IN_GITDIR, PROTECTED_IN_ROOT, PathBinDir, Protected, ResolvedToolDir,
-    SENSITIVE_PROJECT_PATTERNS, SYSTEM_READ_FILES, TOOL_READ_DIRS, XCODE_SELECT_LINK,
-    active_tool_dirs, ancestor_alternation, app_dirs, colima_socket_paths, copilot_default_pkg_dir,
-    current_uid, escape_regex, first_party_read_target, grant_is_refused, home_config_link_targets,
+    SENSITIVE_KEY_FILE_EXTENSION_PATTERNS, SENSITIVE_PROJECT_PATTERNS, SYSTEM_READ_FILES,
+    TOOL_READ_DIRS, XCODE_SELECT_LINK, active_tool_dirs, ancestor_alternation, app_dirs,
+    colima_socket_paths, copilot_default_pkg_dir, current_uid, escape_regex,
+    first_party_read_target, grant_is_refused, home_config_link_targets,
     missing_home_config_link_targets, nested_alternation, path_bin_dirs, playwright_runtime_intent,
     read_only_home_config, rel_is_glob, rel_regex, validate_playwright_socket_dir,
     validate_sbpl_path,
@@ -216,6 +217,8 @@ pub fn generate_profile_with_playwright_socket_dir(
         &project_roots,
         config.extra_write,
         config.allow_env_files,
+        config.deny_key_files_by_extension,
+        config.extra_deny,
         &home,
         config.existing_home_tool_dirs,
     );
@@ -406,11 +409,14 @@ fn writable_roots(project_roots: &[String], extra_write: &[PathBuf]) -> Vec<Stri
     roots
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_sensitive_project_denies(
     sb: &mut String,
     project_roots: &[String],
     extra_write: &[PathBuf],
     allow_env_files: bool,
+    deny_key_files_by_extension: bool,
+    extra_deny: &[PathBuf],
     home: &str,
     tool_dirs: Option<&[ResolvedToolDir]>,
 ) {
@@ -491,6 +497,18 @@ fn emit_sensitive_project_denies(
             sbpl!(sb, "(deny file-read* (regex #\"/{pattern}\"))");
             sbpl!(sb, "(deny file-write* (regex #\"/{pattern}\"))");
         }
+        // `sandbox.deny_key_files_by_extension`: the patterns above only match
+        // a key file named exactly `.pem`. See the constant's docs. Emitted
+        // before the re-allow below, so dependency fixtures stay readable.
+        let key_patterns: &[&str] = if deny_key_files_by_extension {
+            SENSITIVE_KEY_FILE_EXTENSION_PATTERNS
+        } else {
+            &[]
+        };
+        for pattern in key_patterns {
+            sbpl!(sb, "(deny file-read* (regex #\"/{pattern}\"))");
+            sbpl!(sb, "(deny file-write* (regex #\"/{pattern}\"))");
+        }
         // Re-allow READ inside the extracted dependency stores, after the deny,
         // because SBPL is last-match-wins. Write stays denied: nothing should be
         // writing a `.env` into a module cache.
@@ -507,6 +525,28 @@ fn emit_sensitive_project_denies(
             }
             let t = escape_regex(&tree);
             for pattern in SENSITIVE_PROJECT_PATTERNS {
+                sbpl!(sb, "(allow file-read* (regex #\"^{t}/.*/{pattern}\"))");
+            }
+            if key_patterns.is_empty() {
+                continue;
+            }
+            // An explicit deny inside or above the store wins over the key
+            // file re-allow, as it does for the other opt-in re-allows
+            // (`overlapping_deny`). Without this, `--deny-path ~/go/pkg/mod/x`
+            // would leave `x/server.pem` readable once the key is on.
+            let spellings = [
+                Some(PathBuf::from(&tree)),
+                std::fs::canonicalize(&tree).ok(),
+            ];
+            if let Some(deny) = spellings
+                .iter()
+                .flatten()
+                .find_map(|p| overlapping_deny(extra_deny, p))
+            {
+                withhold_reallow(sb, "sandbox.deny_key_files_by_extension", &tree, deny);
+                continue;
+            }
+            for pattern in key_patterns {
                 sbpl!(sb, "(allow file-read* (regex #\"^{t}/.*/{pattern}\"))");
             }
         }
@@ -3636,6 +3676,7 @@ mod tests {
             allow_gpg_signing: false,
             deny_clipboard: false,
             deny_nested_git: false,
+            deny_key_files_by_extension: false,
             deny_copilot_dir_exec: false,
             allow_jvm_attach: false,
             allow_msbuild: false,
