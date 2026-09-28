@@ -710,6 +710,28 @@ pub fn has_unknown_tightening_keys(config: &RepoConfig) -> bool {
     !config.deny.unknown.is_empty()
 }
 
+/// The `deny.paths` entries that look like a glob pattern.
+///
+/// cplt does not expand globs. An entry is one path, anchored to the repository
+/// root, so `**/*.pem` denies only a file whose name is literally `*.pem` in a
+/// directory literally named `**`. Such an entry is kept, because `*`, `?`,
+/// `[` and `{` are legal in a file name, and dropping it could remove a
+/// restriction that works. It is reported instead: without the warning, the
+/// author believes that the files are denied and nothing says otherwise.
+///
+/// Refusing the entry is not an option here. A validation error drops the
+/// whole file, and with it every other `[deny]` entry (#385 M-01).
+#[must_use]
+pub fn glob_like_deny_paths(config: &RepoConfig) -> Vec<&str> {
+    config
+        .deny
+        .paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| p.contains(['*', '?', '[', '{']))
+        .collect()
+}
+
 pub fn proposed_keys(propose: &ProposeSection) -> Vec<&'static str> {
     let mut keys = Vec::new();
 
@@ -1444,5 +1466,38 @@ write = ["~/.m2/repository"]
 "#;
         let config = parse_repo_config(toml_str).unwrap();
         assert!(validate_repo_config(&config).is_ok());
+    }
+
+    #[test]
+    fn glob_like_deny_paths_are_reported_not_refused() {
+        // cplt does not expand globs, so these match nothing. They must stay
+        // valid: a validation error would drop the whole file, "secrets.txt"
+        // included.
+        let toml_str = r#"
+[deny]
+paths = ["**/*.pem", "certs/*.key", "id_rsa?", "[ab].txt", "*.{pem,key}", "secrets.txt"]
+"#;
+        let config = parse_repo_config(toml_str).unwrap();
+        assert!(validate_repo_config(&config).is_ok());
+        assert_eq!(
+            glob_like_deny_paths(&config),
+            [
+                "**/*.pem",
+                "certs/*.key",
+                "id_rsa?",
+                "[ab].txt",
+                "*.{pem,key}"
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_deny_paths_are_not_reported_as_globs() {
+        let toml_str = r#"
+[deny]
+paths = [".env", "certs/server.pem", "~/secrets", "apps/web/.env.local"]
+"#;
+        let config = parse_repo_config(toml_str).unwrap();
+        assert!(glob_like_deny_paths(&config).is_empty());
     }
 }
