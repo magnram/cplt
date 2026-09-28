@@ -2029,6 +2029,25 @@ fn warn_unknown_repo_config_keys(config: &repo_config::RepoConfig, label: &str) 
     ));
 }
 
+/// Warn about `deny.paths` entries that look like a glob, which cplt takes as
+/// one literal path. `globs` comes from `repo_config::glob_like_deny_paths`.
+fn warn_glob_like_deny_paths(globs: &[&str], label: &str) {
+    if globs.is_empty() {
+        return;
+    }
+    let entries = globs
+        .iter()
+        .map(|p| format!("{p:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let verb = if globs.len() == 1 { "denies" } else { "deny" };
+    ui::warn(&format!(
+        "{label}: cplt does not expand globs in deny.paths. {entries} {verb} \
+         nothing unless a file or directory has exactly that name. Name each \
+         file or directory instead, for example \"certs/server.pem\" or \"certs\"."
+    ));
+}
+
 /// `gh_guard.inject_token` does nothing while the guard is off.
 ///
 /// The injection happens inside the `gh_guard.enabled` branch of the wrapper
@@ -2443,6 +2462,10 @@ fn resolve_context(cli: &Cli, check_mode: bool) -> anyhow::Result<ResolvedContex
                 ui::info(&format!("Repo config: .cplt.toml{source_note}"));
             }
             warn_unknown_repo_config_keys(&loaded.config, ".cplt.toml");
+            warn_glob_like_deny_paths(
+                &repo_config::glob_like_deny_paths(&loaded.config, &loaded.dir),
+                ".cplt.toml",
+            );
             // An unknown `[deny]` key is a restriction that is not applied,
             // the same loss as a file that does not parse. Unknown `[propose]`
             // keys grant nothing and stay forward-compatible.
@@ -2641,9 +2664,11 @@ fn resolve_context(cli: &Cli, check_mode: bool) -> anyhow::Result<ResolvedContex
                         ));
                     }
                 }
-                warn_unknown_repo_config_keys(
-                    &loaded.config,
-                    &root.dir.join(".cplt.toml").display().to_string(),
+                let label = root.dir.join(".cplt.toml").display().to_string();
+                warn_unknown_repo_config_keys(&loaded.config, &label);
+                warn_glob_like_deny_paths(
+                    &repo_config::glob_like_deny_paths(&loaded.config, &loaded.dir),
+                    &label,
                 );
                 if resolved.refuse_invalid_repo_config
                     && repo_config::has_unknown_tightening_keys(&loaded.config)
@@ -7444,6 +7469,10 @@ fn display_repo_config(loaded: &repo_config::LoadedRepoConfig, project_dir: &std
         for v in &rc.deny.env {
             println!("{blue}[cplt]{nc}    env     = {v}");
         }
+        warn_glob_like_deny_paths(
+            &repo_config::glob_like_deny_paths(rc, &loaded.dir),
+            ".cplt.toml",
+        );
         println!();
     }
 
@@ -8055,12 +8084,15 @@ fn run_config_set_repo(
     }
 
     let output = doc.to_string();
-    if let Err(e) = repo_config::parse_and_validate(&output) {
-        ui::error(&format!(
-            "refusing to write invalid .cplt.toml: {e}\n  No changes were saved."
-        ));
-        return ExitCode::FAILURE;
-    }
+    let written = match repo_config::parse_and_validate(&output) {
+        Ok(config) => config,
+        Err(e) => {
+            ui::error(&format!(
+                "refusing to write invalid .cplt.toml: {e}\n  No changes were saved."
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(e) = config::write_repo_document_atomically(&repo_config_path, &doc) {
         ui::error(&format!("cannot write {}: {e}", repo_config_path.display()));
         return ExitCode::FAILURE;
@@ -8087,6 +8119,16 @@ fn run_config_set_repo(
         "{blue}[cplt]{nc} {dim}Updated: {}{nc}",
         repo_config_path.display()
     );
+    // Only the entry just written: the others were warned about when they
+    // were set, and are again at every launch.
+    if !unset && target == config::RepoKeyTarget::Deny("paths") {
+        let stored = config::collapse_tilde(val);
+        let globs: Vec<&str> = repo_config::glob_like_deny_paths(&written, &project_dir)
+            .into_iter()
+            .filter(|p| *p == val || *p == stored)
+            .collect();
+        warn_glob_like_deny_paths(&globs, ".cplt.toml");
+    }
 
     // Remind about trust approval for propose keys
     // Every `[propose]` shape, including the top-level arrays: a proposal the
@@ -8641,6 +8683,10 @@ fn trust_show(project_dir: &std::path::Path, loaded: &repo_config::LoadedRepoCon
         for v in &loaded.config.deny.env {
             println!("{blue}[cplt]{nc}    env:  {v}");
         }
+        warn_glob_like_deny_paths(
+            &repo_config::glob_like_deny_paths(&loaded.config, &loaded.dir),
+            ".cplt.toml",
+        );
         println!();
     }
 

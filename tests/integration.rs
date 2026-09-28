@@ -3548,6 +3548,151 @@ mod macos_tests {
         );
     }
 
+    /// #597: the #477 carve-out re-allows `.env` reads in the Go module cache,
+    /// and must not reopen a `--deny-path` inside it. A module outside the
+    /// deny keeps the carve-out.
+    #[test]
+    fn real_profile_deny_in_module_cache_beats_env_carve_out() {
+        require_sandbox!();
+        let tmp = std::env::temp_dir().join(format!("cplt-597-{}", std::process::id()));
+        let fake_home = tmp.join("home");
+        let modcache = fake_home.join("go/pkg/mod");
+        for m in ["ex@v1", "ok@v1"] {
+            fs::create_dir_all(modcache.join(m)).unwrap();
+            fs::write(modcache.join(m).join(".env"), "secret\n").unwrap();
+            fs::write(modcache.join(m).join("other.txt"), "secret\n").unwrap();
+        }
+        let fake_home = fs::canonicalize(&fake_home).unwrap();
+        let modcache = fs::canonicalize(&modcache).unwrap();
+        let project = fs::canonicalize(".").unwrap();
+
+        let extra_read = vec![modcache.clone()];
+        let extra_deny = vec![modcache.join("ex@v1")];
+        let mut opts = default_opts(&project, &fake_home);
+        opts.extra_read = &extra_read;
+        opts.extra_deny = &extra_deny;
+        let profile = write_real_profile(&opts);
+
+        let read = |rel: &str| {
+            let cmd = format!("/bin/cat '{}/{rel}'", modcache.display());
+            run_sandboxed(&profile, &cmd).1
+        };
+        let denied_env = read("ex@v1/.env");
+        let denied_other = read("ex@v1/other.txt");
+        let carved_env = read("ok@v1/.env");
+
+        fs::remove_dir_all(&tmp).ok();
+        fs::remove_file(&profile).ok();
+        assert!(!denied_other, "--deny-path must block other.txt");
+        assert!(
+            !denied_env,
+            "--deny-path must block .env despite the carve-out"
+        );
+        assert!(
+            carved_env,
+            "outside the deny, the carve-out still re-allows .env"
+        );
+    }
+
+    /// #597 with `sandbox.deny_key_files_by_extension`: the store's key-file
+    /// carve-out must not reopen a `--deny-path` inside it either, and the
+    /// modules outside the deny keep both carve-outs.
+    #[test]
+    fn real_profile_deny_in_module_cache_beats_key_file_carve_out() {
+        require_sandbox!();
+        let tmp = std::env::temp_dir().join(format!("cplt-597-key-{}", std::process::id()));
+        let fake_home = tmp.join("home");
+        let modcache = fake_home.join("go/pkg/mod");
+        for m in ["ex@v1", "ok@v1"] {
+            fs::create_dir_all(modcache.join(m)).unwrap();
+            fs::write(modcache.join(m).join(".env"), "secret\n").unwrap();
+            fs::write(modcache.join(m).join("server.pem"), "secret\n").unwrap();
+        }
+        let fake_home = fs::canonicalize(&fake_home).unwrap();
+        let modcache = fs::canonicalize(&modcache).unwrap();
+        let project = fs::canonicalize(".").unwrap();
+
+        // The grant puts the store under the extension deny.
+        let extra_read = vec![modcache.clone()];
+        let extra_deny = vec![modcache.join("ex@v1")];
+        let mut opts = default_opts(&project, &fake_home);
+        opts.extra_read = &extra_read;
+        opts.extra_deny = &extra_deny;
+        opts.deny_key_files_by_extension = true;
+        let profile = write_real_profile(&opts);
+
+        let read = |rel: &str| {
+            let cmd = format!("/bin/cat '{}/{rel}'", modcache.display());
+            (rel.to_string(), run_sandboxed(&profile, &cmd).1)
+        };
+        let results = [
+            read("ex@v1/.env"),
+            read("ex@v1/server.pem"),
+            read("ok@v1/.env"),
+            read("ok@v1/server.pem"),
+        ];
+
+        fs::remove_dir_all(&tmp).ok();
+        fs::remove_file(&profile).ok();
+        for (rel, readable) in results {
+            assert_eq!(
+                readable,
+                rel.starts_with("ok@v1"),
+                "{rel}: only the module outside --deny-path is readable"
+            );
+        }
+    }
+
+    /// #597 class: the pnpm `store` write allow follows the user's denies, so
+    /// it must be withheld under a `--deny-path` covering the pnpm home.
+    /// Without the deny the store stays writable and the rest of the pnpm
+    /// home does not, which shows the PATH-bin rules are in effect.
+    #[test]
+    fn real_profile_deny_on_pnpm_home_blocks_store_writes() {
+        require_sandbox!();
+        let tmp = std::env::temp_dir().join(format!("cplt-597-pnpm-{}", std::process::id()));
+        let pnpm = tmp.join("home/Library/pnpm");
+        fs::create_dir_all(pnpm.join("store")).unwrap();
+        let fake_home = fs::canonicalize(tmp.join("home")).unwrap();
+        let pnpm = fs::canonicalize(&pnpm).unwrap();
+        let project = fs::canonicalize(".").unwrap();
+
+        let write = |extra_deny: &[PathBuf], rel: &str| {
+            let mut opts = default_opts(&project, &fake_home);
+            opts.extra_deny = extra_deny;
+            let profile = write_real_profile(&opts);
+            let cmd = format!("echo x > '{}/{rel}'", pnpm.display());
+            let ok = run_sandboxed(&profile, &cmd).1;
+            fs::remove_file(&profile).ok();
+            ok
+        };
+        let open_store = write(&[], "store/a");
+        let open_bin = write(&[], "pnpm-shim");
+        let denied_store = write(std::slice::from_ref(&pnpm), "store/b");
+        // A deny inside the store closes only that part of it.
+        fs::create_dir_all(pnpm.join("store/v10")).unwrap();
+        fs::create_dir_all(pnpm.join("store/other")).unwrap();
+        let v10 = [pnpm.join("store/v10")];
+        let denied_v10 = write(&v10, "store/v10/c");
+        let open_other = write(&v10, "store/other/c");
+
+        fs::remove_dir_all(&tmp).ok();
+        assert!(
+            !denied_v10,
+            "--deny-path on store/v10 must block writes into it"
+        );
+        assert!(
+            open_other,
+            "--deny-path on store/v10 must leave the rest of the store writable"
+        );
+        assert!(open_store, "without a deny, the pnpm store stays writable");
+        assert!(!open_bin, "without a deny, the pnpm home stays read-only");
+        assert!(
+            !denied_store,
+            "--deny-path on the pnpm home must block writes into store/"
+        );
+    }
+
     // ── Localhost blocking ────────────────────────────────────────
 
     #[test]

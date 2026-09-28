@@ -201,7 +201,7 @@ pub fn generate_profile_with_playwright_socket_dir(
     // Keep PATH-resolved bin and shim locations read-only after user allows.
     // The pnpm rule re-allows its two writable stores, so all security denies
     // below must remain later in the last-match-wins profile.
-    emit_path_bin_denies(&mut sb, config.home_dir);
+    emit_path_bin_denies(&mut sb, config.home_dir, config.extra_deny);
     emit_shim_dir_denies(&mut sb, config);
     // Keeps the exec-allowed toolchain dirs non-writable even when a user
     // allow.write covers ~/.gradle or ~/.konan (write-then-exec): after every
@@ -219,9 +219,9 @@ pub fn generate_profile_with_playwright_socket_dir(
         config.extra_read,
         config.allow_env_files,
         config.deny_key_files_by_extension,
-        config.extra_deny,
         &home,
         config.existing_home_tool_dirs,
+        config.extra_deny,
     );
     // Same reason, and one more: the worktree common-dir allow is emitted early
     // (so DENIED_DOTFILES still wins over it), which would leave its denies
@@ -418,9 +418,9 @@ fn emit_sensitive_project_denies(
     extra_read: &[PathBuf],
     allow_env_files: bool,
     deny_key_files_by_extension: bool,
-    extra_deny: &[PathBuf],
     home: &str,
     tool_dirs: Option<&[ResolvedToolDir]>,
+    extra_deny: &[PathBuf],
 ) {
     // All security-critical project denies are emitted LAST in the profile.
     // SBPL uses last-match-wins, so these must come after all user-configured
@@ -549,6 +549,12 @@ fn emit_sensitive_project_denies(
         // (#477). Scoped to a short explicit list rather than a heuristic: the
         // properties that make it safe (content-addressed, checksum-verified,
         // from a registry) are ones only these trees have.
+        // A `--deny-path` in or above a tree is emitted before its re-allow,
+        // which last-match-wins would reopen for its `.env` files (#597).
+        // Repeat the read deny after every re-allow, narrowed to the overlap
+        // (the tree, for a deny above it) and once per scope; the rest of the
+        // tree keeps the carve-out.
+        let mut redeny = std::collections::BTreeSet::new();
         for tree in dependency_source_trees(home, tool_dirs) {
             if validate_sbpl_path(Path::new(&tree)).is_err() {
                 continue;
@@ -557,34 +563,23 @@ fn emit_sensitive_project_denies(
             for pattern in SENSITIVE_PROJECT_PATTERNS {
                 sbpl!(sb, "(allow file-read* (regex #\"^{t}/.*/{pattern}\"))");
             }
-            if key_patterns.is_empty() {
-                continue;
-            }
-            // An explicit deny inside or above the store wins over the key
-            // file re-allow, as it does for the other opt-in re-allows
-            // (`overlapping_deny`). Without this, `--deny-path ~/go/pkg/mod/x`
-            // would leave `x/server.pem` readable once the key is on.
-            //
-            // Fail-closed and coarse: a deny anywhere under the store withholds
-            // the key-file re-allow for the WHOLE store, so `server.pem` in
-            // every other module there stays denied too (when a granted tree
-            // covers the store). Exact-name files in a store (`.env`, `.pem`)
-            // are handled by #597 (PR #601), not here.
-            let spellings = [
-                Some(PathBuf::from(&tree)),
-                std::fs::canonicalize(&tree).ok(),
-            ];
-            if let Some(deny) = spellings
-                .iter()
-                .flatten()
-                .find_map(|p| overlapping_deny(extra_deny, p))
-            {
-                withhold_reallow(sb, "sandbox.deny_key_files_by_extension", &tree, deny);
-                continue;
-            }
+            // `sandbox.deny_key_files_by_extension`: the same read carve-out
+            // for key files by extension. A `--deny-path` overlapping the store
+            // is handled by the re-deny below, like the `.env` carve-out above.
             for pattern in key_patterns {
                 sbpl!(sb, "(allow file-read* (regex #\"^{t}/.*/{pattern}\"))");
             }
+            let tree = PathBuf::from(tree);
+            for deny in extra_deny {
+                if tree.starts_with(deny) {
+                    redeny.insert(tree.clone());
+                } else if deny.starts_with(&tree) {
+                    redeny.insert(deny.clone());
+                }
+            }
+        }
+        for scope in redeny {
+            sbpl!(sb, "(deny file-read* (subpath \"{}\"))", scope.display());
         }
         sbpl!(sb);
     }
@@ -1751,7 +1746,11 @@ fn emit_copilot_pkg_denies(sb: &mut String, config: &SandboxConfig) {
         // Copilot loads its extracted JS and native modules from it. The
         // carve-out's write deny still follows.
         let pkg = pkg_dir.to_string_lossy();
-        sbpl!(sb, "(allow file-read* (subpath \"{pkg}\"))");
+        // Emitted after the user's `--deny-path` rules, so it would reopen
+        // reads under one that overlaps it (#597). `validate_copilot_cache_env`
+        // already refuses that launch; the profile still never carries the
+        // reopening allow.
+        reallow_below_user_denies(sb, config.extra_deny, "Copilot pkg", "read", pkg_dir, true);
         emit_copilot_pkg_exec(sb, &pkg);
         emit_copilot_pkg_write_deny(sb, &pkg, &pins);
     }
@@ -1969,7 +1968,7 @@ fn emit_dotnet_exec_denies(sb: &mut String, dotnet_root: Option<&Path>) {
 /// (`policy::mise_ro_protect_paths`) and the rest by the `HOME_TOOL_DIRS`
 /// shape; the `TopLevel` shape has no Landlock equivalent at all for a
 /// relocated `XDG_DATA_HOME`. See docs/security.md.
-fn emit_path_bin_denies(sb: &mut String, home_dir: &Path) {
+fn emit_path_bin_denies(sb: &mut String, home_dir: &Path, extra_deny: &[PathBuf]) {
     sbpl!(sb, ";; PATH-resolved bin/shim dirs stay read-only");
     for dir in path_bin_dirs(home_dir) {
         match dir {
@@ -1986,11 +1985,15 @@ fn emit_path_bin_denies(sb: &mut String, home_dir: &Path) {
                 }
                 let p = path.display();
                 sbpl!(sb, "(deny file-write* (subpath \"{p}\"))");
-                sbpl!(sb, "(allow file-write* (subpath \"{p}/store\"))");
-                sbpl!(
-                    sb,
-                    "(allow file-write* (subpath \"{p}/package-manager-store\"))"
-                );
+                // Emitted after the user's `--deny-path` rules, so a store
+                // allow would reopen writes under one that overlaps it (#597).
+                // `path_bin_dirs` names both pnpm homes whether or not they
+                // exist, so only warn about a store that is there.
+                for store in ["store", "package-manager-store"] {
+                    let store = path.join(store);
+                    let warn = store.exists();
+                    reallow_below_user_denies(sb, extra_deny, "pnpm store", "write", &store, warn);
+                }
                 sbpl!(sb, "(deny process-exec (subpath \"{p}\"))");
                 sbpl!(
                     sb,
@@ -2745,10 +2748,46 @@ fn withhold_reallow(sb: &mut String, grant: &str, reallow: &str, deny: &Path) {
     crate::ui::warn(&format!(
         "{grant}: --deny-path {deny} overlaps {reallow}; leaving it denied, not re-allowing it"
     ));
+    note_withheld(sb, grant, reallow, &deny);
+}
+
+fn note_withheld(sb: &mut String, grant: &str, reallow: &str, deny: &dyn std::fmt::Display) {
     sbpl!(
         sb,
         ";; {grant} re-allow withheld: --deny-path {deny} overlaps {reallow}"
     );
+}
+
+/// Emit `(allow file-{op}* (subpath root))` after the user's `--deny-path`
+/// rules without reopening any of them (#597).
+///
+/// A deny at or above `root` withholds the allow ([`withhold_reallow`], or
+/// only its breadcrumb when `warn` is false). A deny inside `root` keeps the
+/// allow for the rest of the tree and repeats that deny right after it, read
+/// and write as `emit_deny_rules` emits it, so last-match-wins keeps it closed.
+fn reallow_below_user_denies(
+    sb: &mut String,
+    extra_deny: &[PathBuf],
+    grant: &str,
+    op: &str,
+    root: &Path,
+    warn: bool,
+) {
+    let r = root.to_string_lossy();
+    if let Some(deny) = extra_deny.iter().find(|d| root.starts_with(d)) {
+        if warn {
+            withhold_reallow(sb, grant, &r, deny);
+        } else {
+            note_withheld(sb, grant, &r, &deny.display());
+        }
+        return;
+    }
+    sbpl!(sb, "(allow file-{op}* (subpath \"{r}\"))");
+    for deny in extra_deny.iter().filter(|d| d.starts_with(root)) {
+        let d = deny.to_string_lossy();
+        sbpl!(sb, "(deny file-read* (subpath \"{d}\"))");
+        sbpl!(sb, "(deny file-write* (subpath \"{d}\"))");
+    }
 }
 
 /// Allow GPG commit signing when `--allow-gpg-signing` is set.

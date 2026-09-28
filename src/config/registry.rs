@@ -202,7 +202,7 @@ pub(super) const CONFIG_KEYS: &[ConfigKeyInfo] = &[
         value_type: ConfigValueType::StrArray,
         dangerous: false,
         default_display: "[]",
-        description: "Extra paths to deny access to (overrides project-dir allows for sensitive subdirs).",
+        description: "Extra paths to deny access to (overrides project-dir allows for sensitive subdirs). Each entry is one literal path: globs such as `**/*.pem` are not expanded.",
     },
     ConfigKeyInfo {
         section: "deny",
