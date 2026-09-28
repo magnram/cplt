@@ -239,6 +239,131 @@ pub fn bubblewrap_state(_use_bubblewrap: Option<bool>) -> Bubblewrap {
     Bubblewrap::NotApplicable
 }
 
+/// Auto-detect (`use_bubblewrap` unset) found no usable bubblewrap, so the
+/// launch runs Landlock + seccomp only and says so in one line nobody reads.
+/// `use_bubblewrap = true` has its own blocking finding; `false` was a choice.
+#[must_use]
+pub fn bubblewrap_finding(state: &Bubblewrap, use_bubblewrap: Option<bool>) -> Option<Finding> {
+    if use_bubblewrap.is_some() {
+        return None;
+    }
+    match state {
+        Bubblewrap::NotInstalled => Some(Finding::warning(
+            "bubblewrap is not installed: the launch runs Landlock + seccomp only, without the \
+             mount-level protections listed above.",
+            Some(
+                "sudo apt install bubblewrap (or your distro's package; it must land in /usr/bin)"
+                    .to_string(),
+            ),
+        )),
+        Bubblewrap::Unusable { reason, .. } => {
+            let lower = reason.to_ascii_lowercase();
+            // bwrap says "No permissions to create new namespace" or fails
+            // "setting up uid map" when unprivileged user namespaces are off.
+            let userns = lower.contains("namespace") || lower.contains("uid map");
+            Some(Finding::warning(
+                format!(
+                    "bubblewrap is installed but its probe fails ({reason}): the launch falls \
+                     back to Landlock + seccomp only."
+                ),
+                userns.then(|| {
+                    "enable user namespaces (sysctl kernel.unprivileged_userns_clone=1; on \
+                     Ubuntu 23.10+ kernel.apparmor_restrict_unprivileged_userns blocks them)"
+                        .to_string()
+                }),
+            ))
+        }
+        _ => None,
+    }
+}
+
+// ── Rule: a project on a Windows drive under WSL ───────────────
+
+/// A project under `/mnt/<drive>/` is served over 9p (or virtiofs), where
+/// nobody has verified Landlock's behaviour and every file access crosses the
+/// VM boundary. Same path test as the Windows-interop agent check, gated on
+/// the same WSL signal: on plain Linux `/mnt/c` is an ordinary mount.
+#[must_use]
+pub fn wsl_drive_project_finding(project_dir: &Path, wsl: bool) -> Option<Finding> {
+    if !crate::agent::is_wsl_interop_binary(project_dir, wsl) {
+        return None;
+    }
+    // Only the drive: the rest is usually /mnt/c/Users/<name>/….
+    let drive = project_dir
+        .components()
+        .nth(2)?
+        .as_os_str()
+        .to_string_lossy();
+    Some(Finding::warning(
+        format!(
+            "The project is on the Windows drive /mnt/{drive}: Landlock enforcement on that \
+             mount is unverified, and every file access crosses 9p, which is slow."
+        ),
+        Some("move the project into the distro (e.g. ~/src) and run cplt there".to_string()),
+    ))
+}
+
+// ── Rule: a /dev grant without bubblewrap ──────────────────────
+
+/// A grant on `/dev` (or `/`, or `/dev/pts` itself) covers every numbered
+/// terminal of the user's other windows, which the default policy withholds
+/// (GHSA-q3p2-6x2x-8w8w). Under bubblewrap `--dev /dev` gives the session its
+/// own devpts and the grant only reaches that; without it, the host's.
+///
+/// Honest about what is left: on Linux seccomp still denies `TIOCSTI` /
+/// `TIOCLINUX`, so it is reading input and forging output, not injection.
+#[must_use]
+pub fn pts_grant_finding(
+    policy: &LandlockPolicy,
+    bubblewrap_active: bool,
+    linux: bool,
+) -> Option<Finding> {
+    if bubblewrap_active {
+        return None;
+    }
+    let pts = Path::new("/dev/pts");
+    let rule = policy
+        .fs_rules
+        .iter()
+        .filter(|r| r.access.read || r.access.write)
+        .find(|r| pts.starts_with(&r.path) || r.path.starts_with(pts))?;
+    let (kind, reach) = if rule.access.write {
+        (
+            "allow.write",
+            "read what you type in them and write into them",
+        )
+    } else {
+        ("allow.read", "read what you type in them")
+    };
+    let (devices, fix) = if linux {
+        (
+            "/dev/pts/N",
+            "let bubblewrap wrap the launch (sudo apt install bubblewrap; its private /dev/pts \
+             holds only the session's own terminals), or drop the grant and run PTY-hungry \
+             commands outside cplt",
+        )
+    } else {
+        (
+            "/dev/ttysNNN",
+            "drop the grant and run PTY-hungry commands outside cplt; if you need it, pass \
+             --allow-write /dev for a single run rather than keeping it in config",
+        )
+    };
+    let seccomp = if linux {
+        " seccomp still blocks TIOCSTI keystroke injection."
+    } else {
+        ""
+    };
+    Some(Finding::warning(
+        format!(
+            "{kind} {} reaches every {devices}, the terminals of your other windows: the agent \
+             can {reach}.{seccomp}",
+            rule.path.display()
+        ),
+        Some(fix.to_string()),
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn first_line(s: &str) -> String {
     s.lines()
@@ -431,6 +556,78 @@ mod tests {
         ]);
         assert!(shim_findings(&p2, &[("node", shim.as_path())], &tmp).is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bubblewrap_finding_only_on_auto_detect_without_a_usable_bwrap() {
+        let missing = Bubblewrap::NotInstalled;
+        let f = bubblewrap_finding(&missing, None).expect("not installed warns");
+        assert_eq!(f.level, Level::Warning);
+        assert!(f.fix.unwrap().contains("apt install bubblewrap"));
+        // `true` has its own blocking finding; `false` was a choice.
+        assert!(bubblewrap_finding(&missing, Some(true)).is_none());
+        assert!(bubblewrap_finding(&missing, Some(false)).is_none());
+        assert!(bubblewrap_finding(&Bubblewrap::Usable("/usr/bin/bwrap".into()), None).is_none());
+        assert!(bubblewrap_finding(&Bubblewrap::NotApplicable, None).is_none());
+
+        let userns = Bubblewrap::Unusable {
+            path: "/usr/bin/bwrap".into(),
+            reason: "bwrap: setting up uid map: Permission denied".into(),
+        };
+        let f = bubblewrap_finding(&userns, None).expect("unusable warns");
+        assert!(f.message.contains("uid map"));
+        assert!(f.fix.unwrap().contains("unprivileged_userns_clone"));
+        let other = Bubblewrap::Unusable {
+            path: "/usr/bin/bwrap".into(),
+            reason: "bwrap: Can't mount proc".into(),
+        };
+        assert!(bubblewrap_finding(&other, None).unwrap().fix.is_none());
+    }
+
+    #[test]
+    fn wsl_drive_project_names_the_drive_but_not_the_user() {
+        let p = Path::new("/mnt/c/Users/hans/src/app");
+        let f = wsl_drive_project_finding(p, true).expect("finding");
+        assert!(f.message.contains("/mnt/c:"));
+        assert!(!f.message.contains("hans"));
+        assert!(f.fix.unwrap().contains("~/src"));
+        // Not WSL: /mnt/c is an ordinary mount.
+        assert!(wsl_drive_project_finding(p, false).is_none());
+        // WSL's own mounts and the Linux filesystem are fine.
+        assert!(wsl_drive_project_finding(Path::new("/mnt/wsl/x"), true).is_none());
+        assert!(wsl_drive_project_finding(Path::new("/home/u/src/app"), true).is_none());
+    }
+
+    #[test]
+    fn pts_grant_finding_fires_on_a_covering_grant_without_bubblewrap() {
+        let dev_rw = policy(vec![("/dev/null", true, false), ("/dev", true, false)]);
+        let f = pts_grant_finding(&dev_rw, false, true).expect("finding");
+        assert!(
+            f.message
+                .starts_with("allow.write /dev reaches every /dev/pts/N")
+        );
+        assert!(f.message.contains("TIOCSTI"), "honest about seccomp");
+        assert!(f.fix.unwrap().contains("bubblewrap"));
+        // bubblewrap gives the session its own devpts.
+        assert!(pts_grant_finding(&dev_rw, true, true).is_none());
+        // macOS: no seccomp claim, no bubblewrap fix.
+        let mac = pts_grant_finding(&dev_rw, false, false).unwrap();
+        assert!(mac.message.contains("/dev/ttysNNN"));
+        assert!(!mac.message.contains("TIOCSTI"));
+        assert!(!mac.fix.unwrap().contains("bubblewrap"));
+        // Read-only covering grant still leaks input, but not output.
+        let pts_ro = policy(vec![("/dev/pts/3", false, false)]);
+        let f = pts_grant_finding(&pts_ro, false, true).unwrap();
+        assert!(f.message.starts_with("allow.read /dev/pts/3"));
+        assert!(!f.message.contains("write into"));
+        // The default device grants do not cover /dev/pts.
+        let defaults = policy(vec![
+            ("/dev/null", true, false),
+            ("/dev/tty", true, false),
+            ("/dev/ptmx", true, false),
+            ("/dev/shm", true, false),
+        ]);
+        assert!(pts_grant_finding(&defaults, false, true).is_none());
     }
 
     #[test]

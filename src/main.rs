@@ -7007,8 +7007,11 @@ fn run_doctor(cli: &Cli, verbose: bool) -> ExitCode {
                  (sysctl kernel.unprivileged_userns_clone=1), or drop use_bubblewrap",
             ));
         }
+        findings.extend(doctor::bubblewrap_finding(
+            &bubblewrap,
+            resolved.use_bubblewrap,
+        ));
     }
-    let _ = &bubblewrap;
     println!();
 
     // ── the policy a launch would build, for the rules below ──
@@ -7051,6 +7054,13 @@ fn run_doctor(cli: &Cli, verbose: bool) -> ExitCode {
         keychain_substitute,
     );
     let policy = sandbox::generate_policy(&sandbox_config);
+
+    findings.extend(doctor::wsl_drive_project_finding(&project_dir, wsl));
+    findings.extend(doctor::pts_grant_finding(
+        &policy,
+        bubblewrap.active(),
+        cfg!(target_os = "linux"),
+    ));
 
     // Only for an agent that can run: "Pi will not start" under "Pi is not
     // installed" is noise.
@@ -7158,10 +7168,27 @@ fn run_doctor(cli: &Cli, verbose: bool) -> ExitCode {
     if verbose {
         println!();
         println!("── inventory ──");
-        println!("project:  {}", project_dir.display());
-        println!("home:     {}", home_dir.display());
+        println!("project:  {}", tilde(&project_dir));
+        println!("home:     ~");
+        // The effective grants, after presets, repo proposals and the
+        // build-credential expansion: what a launch would hand the sandbox.
+        for (key, paths) in [
+            ("allow.read", &resolved.allow_read),
+            ("allow.write", &resolved.allow_write),
+            ("deny.paths", &resolved.deny_paths),
+        ] {
+            let shown: Vec<String> = paths.iter().map(|p| tilde(p)).collect();
+            println!(
+                "{key:<12} {}",
+                if shown.is_empty() {
+                    "none".to_string()
+                } else {
+                    shown.join(", ")
+                }
+            );
+        }
         println!();
-        discover::discover_all(&home_dir, &project_dir).print_report();
+        discover::discover_all(&home_dir, &project_dir).print_report(&home_dir);
         print_project_ecosystems(&project_dir);
     }
 
