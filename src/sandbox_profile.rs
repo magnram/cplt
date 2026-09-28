@@ -526,7 +526,7 @@ fn emit_sensitive_project_denies(
                 if let Some(ca) = key_root_covers_system_ca(root) {
                     crate::ui::warn(&format!(
                         "sandbox.deny_key_files_by_extension: the grant {root} covers {ca}, \
-                         so the system CA bundles there (cert.pem) are denied too and \
+                         so the CA bundles there (cert.pem, cacert.pem) are denied too and \
                          curl, git over HTTPS and pip will fail TLS setup. Narrow the grant, \
                          or set sandbox.deny_key_files_by_extension = false."
                     ));
@@ -2714,8 +2714,16 @@ fn overlapping_home_deny<'a>(
         .find_map(|p| overlapping_deny(extra_deny, Path::new(p)))
 }
 
-/// Where macOS and Homebrew keep the CA bundles TLS clients read.
-const SYSTEM_CA_DIRS: [&str; 3] = ["/private/etc/ssl", "/opt/homebrew/etc", "/usr/local/etc"];
+/// Where macOS and Homebrew keep the CA bundles TLS clients read. The Cellar
+/// holds the real files behind Homebrew's symlinks, including each Python's
+/// `certifi/cacert.pem` and `ca-certificates`' own bundle.
+const SYSTEM_CA_DIRS: [&str; 5] = [
+    "/private/etc/ssl",
+    "/opt/homebrew/etc",
+    "/usr/local/etc",
+    "/opt/homebrew/Cellar",
+    "/usr/local/Cellar",
+];
 
 /// The system CA directory a key-file extension deny on `root` would reach,
 /// if any: `root` at or above it (`--allow-read /`), or inside it.
@@ -3119,6 +3127,9 @@ mod tests {
             ("/opt", "/opt/homebrew/etc"),
             ("/opt/homebrew/etc/openssl@3", "/opt/homebrew/etc"),
             ("/usr/local", "/usr/local/etc"),
+            ("/opt/homebrew/Cellar", "/opt/homebrew/Cellar"),
+            ("/opt/homebrew/Cellar/python@3.14", "/opt/homebrew/Cellar"),
+            ("/usr/local/Cellar", "/usr/local/Cellar"),
         ] {
             assert_eq!(key_root_covers_system_ca(root), Some(ca), "{root}");
         }
@@ -3126,7 +3137,7 @@ mod tests {
         for root in [
             "/Users/test/app",
             "/private/etc/sslx",
-            "/opt/homebrew/Cellar",
+            "/opt/homebrew/bin",
             "/usr/local/bin",
             "/work/app.v1+x",
         ] {

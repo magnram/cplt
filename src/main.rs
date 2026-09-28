@@ -10221,10 +10221,6 @@ mod tests {
         assert_eq!(merged.len(), 1, "one root, one record: {merged:?}");
     }
 
-    /// The hand-written matcher must cover every pattern the profile denies.
-    /// It cannot be derived from them — they are SBPL regex source and there is
-    /// no regex engine linked — so this is the thing that stops the two
-    /// drifting when someone adds a pattern (#401).
     #[test]
     fn extension_only_match_ignores_exact_names() {
         let s = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -10237,6 +10233,10 @@ mod tests {
         assert!(!any_extension_only_match(&s(&["x.pem/.key"])));
     }
 
+    /// The hand-written matcher must cover every pattern the profile denies.
+    /// It cannot be derived from them — they are SBPL regex source and there is
+    /// no regex engine linked — so this is the thing that stops the two
+    /// drifting when someone adds a pattern (#401).
     #[test]
     fn sensitive_basename_matches_the_profile_patterns() {
         assert_eq!(
