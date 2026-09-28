@@ -2156,6 +2156,96 @@ fn the_env_deny_is_lifted_for_read_inside_dependency_stores_only() {
     );
 }
 
+/// #597: a `--deny-path` in or above a dependency store must win over the
+/// #477 carve-out. The user deny is emitted before the carve-out, so a read
+/// deny is repeated after the last re-allow, narrowed to the overlap: the
+/// deny itself when it is inside the store, the store when the deny is above
+/// it. An unrelated deny is not repeated.
+#[test]
+fn a_user_deny_in_a_dependency_store_beats_the_env_carve_out() {
+    for (deny, scope, tree, repeated) in [
+        (
+            "/Users/test/go/pkg/mod/ex@v1",
+            "/Users/test/go/pkg/mod/ex@v1",
+            "go/pkg/mod",
+            true,
+        ),
+        (
+            "/Users/test/go",
+            "/Users/test/go/pkg/mod",
+            "go/pkg/mod",
+            true,
+        ),
+        (
+            "/Users/test/.cargo/registry/src",
+            "/Users/test/.cargo/registry/src",
+            "\\.cargo/registry",
+            true,
+        ),
+        (
+            "/Users/test/.gradle",
+            "/Users/test/.gradle",
+            "go/pkg/mod",
+            false,
+        ),
+    ] {
+        let extra_deny = [PathBuf::from(deny)];
+        let profile = generate_profile(
+            &SandboxConfig {
+                extra_deny: &extra_deny,
+                ..base_profile_options()
+            },
+            &[],
+        );
+        let rule = format!("(deny file-read* (subpath \"{scope}\"))");
+        let last_deny = profile.rfind(&rule).unwrap_or(0);
+        let last_allow = profile
+            .rfind(&format!("(allow file-read* (regex #\"^/Users/test/{tree}/"))
+            .expect("the carve-out is emitted");
+        assert_eq!(
+            last_deny > last_allow,
+            repeated,
+            "--deny-path {deny}: {scope} read deny after the carve-out should be {repeated}\n{profile}"
+        );
+        // The ancestor itself is not re-denied after the carve-out.
+        let own = format!("(deny file-read* (subpath \"{deny}\"))");
+        assert_eq!(
+            profile.matches(&own).count(),
+            usize::from(repeated && deny == scope) + 1
+        );
+    }
+}
+
+/// #597 review: a deny above both stores (`--deny-path ~`) is repeated once
+/// per store, narrowed to it, and never as the whole ancestor.
+#[test]
+fn a_user_deny_above_both_stores_is_repeated_once_per_store() {
+    let extra_deny = [PathBuf::from("/Users/test")];
+    let profile = generate_profile(
+        &SandboxConfig {
+            extra_deny: &extra_deny,
+            ..base_profile_options()
+        },
+        &[],
+    );
+    assert_eq!(
+        profile
+            .matches("(deny file-read* (subpath \"/Users/test\"))")
+            .count(),
+        1,
+        "the ancestor deny is emitted once, by the user deny rules\n{profile}"
+    );
+    for store in ["/Users/test/go/pkg/mod", "/Users/test/.cargo/registry"] {
+        assert_eq!(
+            profile
+                .matches(&format!("(deny file-read* (subpath \"{store}\"))"))
+                .count(),
+            1,
+            "{store} must be re-denied exactly once\n{profile}"
+        );
+    }
+}
+
 /// A relocated `GOPATH` / `CARGO_HOME` must move the carve-out with it.
 ///
 /// The trees are named by their `HOME_TOOL_DIRS` entry plus a subpath, because
@@ -4468,6 +4558,143 @@ fn profile_keeps_the_sibling_package_and_cache_trees_writable() {
     ] {
         assert!(p.contains(rule), "{what} must stay writable: {rule}");
     }
+}
+
+/// #597 class: the pnpm store write allows are emitted after the user's
+/// denies, so a `--deny-path` overlapping a store withholds its allow instead
+/// of reopening writes under the deny. Checked per store and per shape.
+#[test]
+fn a_user_deny_over_a_pnpm_store_withholds_its_write_allow() {
+    let allow = |p: &str| format!("(allow file-write* (subpath \"/Users/test/{p}\"))");
+    for (deny, withheld, kept) in [
+        (
+            "/Users/test/Library/pnpm",
+            &["Library/pnpm/store", "Library/pnpm/package-manager-store"][..],
+            &[
+                ".local/share/pnpm/store",
+                ".local/share/pnpm/package-manager-store",
+            ][..],
+        ),
+        (
+            "/Users/test/Library",
+            &["Library/pnpm/store", "Library/pnpm/package-manager-store"][..],
+            &[".local/share/pnpm/store"][..],
+        ),
+        (
+            "/Users/test/.local/share/pnpm",
+            &[
+                ".local/share/pnpm/store",
+                ".local/share/pnpm/package-manager-store",
+            ][..],
+            &["Library/pnpm/store"][..],
+        ),
+    ] {
+        let extra_deny = [PathBuf::from(deny)];
+        let p = generate_profile(
+            &SandboxConfig {
+                extra_deny: &extra_deny,
+                ..base_profile_options()
+            },
+            &[],
+        );
+        // The tool-dir grants allow the stores too, but before the user
+        // denies; only an allow in the PATH-bin block would reopen them.
+        let block = p
+            .find(";; PATH-resolved bin/shim dirs stay read-only")
+            .expect("the PATH-bin block is emitted");
+        let after_block = |r: &str| p.rfind(&allow(r)).is_some_and(|i| i > block);
+        for w in withheld {
+            assert!(!after_block(w), "--deny-path {deny} must withhold {w}\n{p}");
+            assert!(
+                p.contains(&format!(
+                    ";; pnpm store re-allow withheld: --deny-path {deny} overlaps /Users/test/{w}"
+                )),
+                "--deny-path {deny}: breadcrumb for {w}"
+            );
+        }
+        for k in kept {
+            assert!(after_block(k), "--deny-path {deny} must keep {k}");
+        }
+    }
+}
+
+/// A deny inside a pnpm store keeps the store's write allow for the rest of
+/// the store and repeats itself, read and write, right after that allow.
+#[test]
+fn a_user_deny_inside_a_pnpm_store_is_repeated_after_its_write_allow() {
+    let deny = "/Users/test/Library/pnpm/store/v10";
+    let extra_deny = [PathBuf::from(deny)];
+    let p = generate_profile(
+        &SandboxConfig {
+            extra_deny: &extra_deny,
+            ..base_profile_options()
+        },
+        &[],
+    );
+    let allow = r#"(allow file-write* (subpath "/Users/test/Library/pnpm/store"))"#;
+    let block = p
+        .find(";; PATH-resolved bin/shim dirs stay read-only")
+        .expect("the PATH-bin block is emitted");
+    let at = p[block..].find(allow).map(|i| i + block);
+    let at = at.unwrap_or_else(|| panic!("the store allow is kept\n{p}"));
+    let tail = &p[at + allow.len()..];
+    let expect = format!(
+        "\n(deny file-read* (subpath \"{deny}\"))\n(deny file-write* (subpath \"{deny}\"))\n"
+    );
+    assert!(
+        tail.starts_with(&expect),
+        "the deny follows the store allow\n{p}"
+    );
+    assert!(!p.contains("re-allow withheld"), "nothing is withheld\n{p}");
+}
+
+/// #597 class: the read allow for a relocated Copilot `pkg` is emitted after
+/// the user's denies, so a `--deny-path` at or above it withholds it, and one
+/// inside it is repeated right after it.
+/// (`validate_copilot_cache_env` also refuses that launch.)
+#[test]
+fn a_user_deny_over_a_moved_copilot_pkg_withholds_its_read_allow() {
+    let env = cache_env(&[("COPILOT_CACHE_HOME", "/opt/copilot-cache")]);
+    let read = "(allow file-read* (subpath \"/opt/copilot-cache/pkg\"))";
+    for (deny, withheld) in [
+        ("/opt", true),
+        ("/opt/copilot-cache/pkg", true),
+        ("/opt/copilot-cache/pkg/x", false),
+        ("/opt/other", false),
+    ] {
+        let extra_deny = [PathBuf::from(deny)];
+        let p = generate_profile(
+            &SandboxConfig {
+                copilot_cache_env: &env,
+                extra_deny: &extra_deny,
+                ..base_profile_options()
+            },
+            &[],
+        );
+        assert_eq!(!p.contains(read), withheld, "--deny-path {deny}\n{p}");
+        assert_eq!(
+            p.contains(";; Copilot pkg re-allow withheld"),
+            withheld,
+            "--deny-path {deny}: breadcrumb"
+        );
+    }
+    let deny = "/opt/copilot-cache/pkg/x";
+    let extra_deny = [PathBuf::from(deny)];
+    let p = generate_profile(
+        &SandboxConfig {
+            copilot_cache_env: &env,
+            extra_deny: &extra_deny,
+            ..base_profile_options()
+        },
+        &[],
+    );
+    let redeny = format!(
+        "{read}\n(deny file-read* (subpath \"{deny}\"))\n(deny file-write* (subpath \"{deny}\"))\n"
+    );
+    assert!(
+        p.contains(&redeny),
+        "a deny inside pkg follows its allow\n{p}"
+    );
 }
 
 #[test]

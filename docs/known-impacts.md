@@ -90,7 +90,7 @@ macOS is unaffected: the Keychain is granted (narrowed per agent by
 
 `.env*`, `.pem`, `.key`, `.p12`, `.pfx`, `.jks` files are **blocked from reading** by default. This stops a rogue agent exfiltrating secrets, but it has side effects.
 
-**The rule is a pattern on the file name, not a location**, so it applies everywhere the sandbox can reach. The two extracted dependency stores are carved back out for *reading* (#477), because a `.env` there is package content; everywhere else the name is enough to deny it:
+**The rule is a pattern on the file name, not a location**, so it applies everywhere the sandbox can reach. The two extracted dependency stores are carved back out for *reading* (#477), because a `.env` there is package content. A `--deny-path` or `deny.paths` entry inside or above one of those stores still wins over the carve-out (#597). Everywhere else the name is enough to deny it:
 
 | Operation                      | Impact     | Why                                                                   |
 | ------------------------------ | ---------- | --------------------------------------------------------------------- |
@@ -102,7 +102,7 @@ macOS is unaffected: the Keychain is granted (narrowed per agent by
 | TLS dev servers (`.pem` certs) | ⚠️ Blocked  | Local HTTPS certs in `.pem`/`.key` files can't be read                |
 | `.env.example`                 | ⚠️ Blocked  | Matches the `.env.*` pattern; use `--allow-env-files` if needed       |
 | Writing `.env` files           | ✅ Works    | Only read is denied; Copilot can create `.env` from templates         |
-| `go mod verify`, `cargo` over an extracted crate | ✅ Works | Read is re-allowed under `~/go/pkg/mod` and `~/.cargo/registry`: a `.env` there is a library's test fixture (`gotenv` ships one), not your secret, and the content is checksum-verified and came from a registry. Write stays denied |
+| `go mod verify`, `cargo` over an extracted crate | ✅ Works | Read is re-allowed under `~/go/pkg/mod` and `~/.cargo/registry`: a `.env` there is a library's test fixture (`gotenv` ships one), not your secret, and the content is checksum-verified and came from a registry. Write stays denied, and so does read under a path you deny |
 | A `.env` in another dependency store | ⚠️ Blocked | The carve-out is a short explicit list, not a heuristic — only trees that are content-addressed, verified and registry-sourced |
 
 **Fix:**
@@ -1049,7 +1049,7 @@ The directories a package manager puts on your `PATH` are read-only inside the s
 
 **Those commands now fail inside cplt.** That is the point, not a bug. Run them outside, in a normal shell.
 
-**Project-local installs are unaffected.** `npm install`, `pnpm install`, `bun install`, `cargo build`, `go build` and `pip install` in a venv write to the project or to a per-project cache. The sibling package and cache trees stay writable — `~/.bun/install`, `$PNPM_HOME/store`, `~/.npm`, `~/.cargo/registry` — so nothing about ordinary dependency resolution changes.
+**Project-local installs are unaffected.** `npm install`, `pnpm install`, `bun install`, `cargo build`, `go build` and `pip install` in a venv write to the project or to a per-project cache. The sibling package and cache trees stay writable — `~/.bun/install`, `$PNPM_HOME/store`, `~/.npm`, `~/.cargo/registry` — so nothing about ordinary dependency resolution changes. A `--deny-path` or `deny.paths` entry covering a pnpm store (or `$PNPM_HOME`, or anything above it) still wins: cplt withholds that store's write allow and warns, instead of reopening writes under your deny (#597).
 
 **The one that will bite you: mise bootstrap.** mise can no longer install or update *any* toolchain from inside cplt — not only the shimmed ones. The whole `installs/` tree is denied, not just each `<tool>/<version>/bin`, because mise creates a `bin/` only for tools that ship one: on a machine with 207 installed version directories, 55 did. The rest land flat at `installs/<tool>/<version>/<name>`, and in non-shim mode mise puts *that* directory on PATH, so a `bin`-anchored rule would have left the majority of tools as drop points.
 
